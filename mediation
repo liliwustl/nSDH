@@ -1,0 +1,230 @@
+library(mvtnorm)
+library(MASS)
+library(lme4)
+library(nlme)
+library(survival)
+library(abind)
+library(pracma)
+library(pcoxtime)
+library(qs)##qread
+library(haven)
+library(dplyr)
+library(data.table)
+library(lmerTest)
+library(readr)
+Y_impute=qread("/storage/liulili/Y_impute.qs")
+link=read.csv("/storage/liulili/CARDIA_linkTable.csv",check.names = FALSE)
+code1<- colnames(Y_impute)[!is.na(match(colnames(Y_impute),link$BARCODE))]
+Y_impute=Y_impute[,code1]
+link15=link[link$Visit=="Y15",]
+Y15=Y_impute[,intersect(colnames(Y_impute),link15$BARCODE)]
+link20=link[link$Visit=="Y20",]
+Y20=Y_impute[,intersect(colnames(Y_impute),link20$BARCODE)]
+link25=link[link$Visit=="Y25",]
+Y25=Y_impute[,intersect(colnames(Y_impute),link25$BARCODE)]
+link30=link[link$Visit=="Y30",]
+Y30=Y_impute[,intersect(colnames(Y_impute),link30$BARCODE)]
+colnames(Y15)=link$CARDIA_long[match(colnames(Y15),link$BARCODE)]
+colnames(Y20)=link$CARDIA_long[match(colnames(Y20),link$BARCODE)]
+colnames(Y25)=link$CARDIA_long[match(colnames(Y25),link$BARCODE)]
+colnames(Y30)=link$CARDIA_long[match(colnames(Y30),link$BARCODE)]
+M15=t(Y15)
+M20=t(Y20)
+M25=t(Y25)
+M30=t(Y30)
+PC=read.csv("/storage/liulili/PC.csv",check.names = FALSE)
+cell=read.csv("/storage/liulili/cellProp.csv",check.names = FALSE)
+PC15=PC[match(link15$BARCODE,PC$BARCODE),]
+PC15$CARDIA_long=link$CARDIA_long[match(PC15$BARCODE,link$BARCODE)]
+PC20=PC[match(link20$BARCODE,PC$BARCODE),]
+PC20$CARDIA_long=link$CARDIA_long[match(PC20$BARCODE,link$BARCODE)]
+PC25=PC[match(link25$BARCODE,PC$BARCODE),]
+PC25$CARDIA_long=link$CARDIA_long[match(PC25$BARCODE,link$BARCODE)]
+PC30=PC[match(link30$BARCODE,PC$BARCODE),]
+PC30$CARDIA_long=link$CARDIA_long[match(PC30$BARCODE,link$BARCODE)]
+cell15=cell[match(link15$BARCODE,cell$BARCODE),]
+cell15$CARDIA_long=link$CARDIA_long[match(cell15$BARCODE,link$BARCODE)]
+cell20=cell[match(link20$BARCODE,cell$BARCODE),]
+cell20$CARDIA_long=link$CARDIA_long[match(cell20$BARCODE,link$BARCODE)]
+cell25=cell[match(link25$BARCODE,cell$BARCODE),]
+cell25$CARDIA_long=link$CARDIA_long[match(cell25$BARCODE,link$BARCODE)]
+cell30=cell[match(link30$BARCODE,cell$BARCODE),]
+cell30$CARDIA_long=link$CARDIA_long[match(cell30$BARCODE,link$BARCODE)]
+Data=read_sas("/storage/liulili/y0_10_covariate.sas7bdat")
+death=read.csv("/storage/liulili/DEATH22.csv")
+cvd=read.csv("/storage/liulili/CVD22.csv")
+cvd=cvd[-cvd$cvdafnfgtt<0,]##remove CVD when Y15,cvrdafnfftt<0 include DEAD22ftt<0
+cac=data.frame(ID=cvd$ID,status=cvd$CVDafnf,T15=cvd$cvdafnfftt,T20=cvd$cvdafnfgtt,
+               T25=cvd$cvdafnfhtt,T30=cvd$cvdafnfItt,T35=cvd$cvdafnfJtt)
+nsdh_indexs=read_sas("/storage/liulili/nsdh_1210.sas7bdat")
+######################################using the mean of Y0,Y10##################
+nsdh_indexs=nsdh_indexs %>%filter( !is.na(nSDH_index0))%>%filter( !is.na(nSDH_index10))%>%filter( !is.na(nSDH_index15))
+id=intersect(intersect(cac$ID,intersect(nsdh_indexs$ID,Data$ID)),Reduce(union,list(rownames(M15), rownames(M20), rownames(M25), rownames(M30))))
+n=length(id)
+data=Data%>%filter(ID %in% id)
+Z1=data.frame(ID=data$ID,center=data$center_y0,age=data$age_y0,race=data$race_y0,sex=data$sex_y0)
+Z2=data.frame(ID=data$ID,center=data$center_y10,age=data$age_y10,race=data$race_y10,sex=data$sex_y10)
+Z3=data.frame(ID=data$ID,center=data$center_y0,age=data$age_y0+15,race=data$race_y0,sex=data$sex_y0)
+combined_data <- rbind(Z1, Z2,Z3)
+Z<- aggregate(. ~ ID, data=combined_data, FUN=mean, na.rm=TRUE)
+index=nsdh_indexs%>%filter(ID %in% id)
+X15=index$nSDH_index15
+X0=index$nSDH_index0
+X10=index$nSDH_index10
+X <- rep(NA, n)
+yearpoint<- c(0,10,15)
+for(i in 1:n){
+  v <- as.numeric(cbind(X0,X10,X15)[i,])
+  if(sum(!is.na(v))>=2 & !is.na(v[1]) & !is.na(v[3]))
+  {
+    ind = which(!is.na(v))
+    cum = 0
+    for(j in 1:(length(ind)-1))
+    {
+      cum = cum + mean(c(v[ind[j]], v[ind[j+1]])) * diff(yearpoint[ind[c(j, j+1)]])
+    }
+    X[i] <- cum
+  }
+}
+
+CAC=cac%>%filter(ID %in% id)
+delta=5
+interval.max=3
+t=(0:(interval.max-1)*delta)
+ids_in_M15 <- id %in% rownames(M15)
+ids_in_M20 <- CAC$T20>0&id%in%rownames(M20)
+ids_in_M25 <- CAC$T25>0&id%in%rownames(M25)
+ids_in_M30 <- CAC$T30>0&id%in%rownames(M30)
+N <- sum(ids_in_M20)+sum(ids_in_M25)+sum(ids_in_M30) 
+Zt <- data.frame(matrix(0,nrow = N, ncol = ncol(Z))) # ??????Z???????????????
+colnames(Zt) <- colnames(Z)
+Mt <- matrix(0,nrow = N, ncol = ncol(M15)) # ??????M15???M20???????????????
+PCt<- matrix(0,nrow = N, ncol = 7) 
+cellt<- matrix(0,nrow = N, ncol = 6) 
+Xt <- rep(0,N)
+id1 <- rep(0,N)
+tstart <- rep(0,N)
+tstop <- rep(0,N)
+status <- rep(0,N)
+j <- 1
+for(i in 1:n){
+   if(CAC$T20[i]>0&id[i]%in%rownames(M20)){
+    id1[j] <- i
+    Xt[j] <- X[i]
+    Zt[j, ] <- Z[i, ]
+    Mt[j, ] <- M20[id[i], ]
+    PCt[j,]<- as.numeric(PC20[which(PC20$CARDIA_long==id[i]), 1:7])
+    cellt[j,]<- as.numeric(cell20[which(cell20$CARDIA_long==id[i]),1:6])
+    tstart[j] <- 20
+    tstop[j] <- ifelse(CAC$T25[i]<0|!(id[i]%in%union(rownames(M25),rownames(M30))),CAC$T20[i]/365 + 20,25)
+    status[j] <- ifelse(CAC$T25[i]<0,1,0) 
+    j <- j + 1
+  }
+  if(CAC$T25[i]>0&id[i]%in%rownames(M25)){
+    id1[j] <- i
+    Xt[j] <- X[i]
+    Zt[j, ] <- Z[i, ]
+    Mt[j, ] <- M25[id[i], ]
+    PCt[j,]<- as.numeric(PC25[which(PC25$CARDIA_long==id[i]), 1:7])
+    cellt[j,]<- as.numeric(cell25[which(cell25$CARDIA_long==id[i]),1:6])
+    tstart[j] <- 25
+    tstop[j] <- ifelse(CAC$T30[i]<0|!(id[i]%in%rownames(M30)),CAC$T25[i]/365 + 25,30)
+    status[j] <- ifelse(CAC$T30[i]<0,1,0) 
+    j <- j + 1
+  }
+  if(CAC$T30[i]>0&id[i]%in%rownames(M30)){
+    id1[j] <- i
+    Xt[j] <- X[i]
+    Zt[j, ] <- Z[i, ]
+    Mt[j, ] <- M30[id[i], ]
+    PCt[j,]<- as.numeric(PC30[which(PC30$CARDIA_long==id[i]), 1:7])
+    cellt[j,]<- as.numeric(cell30[which(cell30$CARDIA_long==id[i]),1:6])
+    tstart[j] <- 30
+    tstop[j] <- CAC$T30[i]/365 + 30
+    status[j] <- CAC$status[i]
+    j <- j + 1
+  }
+}
+id2=ave(id1, id1, FUN = seq_along)
+colnames(PCt)=colnames(PC15)[1:7]
+colnames(cellt)=colnames(cell15)[1:6]
+PCt=apply(PCt,2,scale)
+cellt=apply(cellt,2,scale)
+cellt=cellt[,-1]##remove CD8T
+Mt=apply(as.matrix(Mt), 2, as.numeric)
+exposure=scale(Xt)
+race=ifelse(Zt$race==5,1,0)
+center1=ifelse(Zt$center==1,1,0)
+center2=ifelse(Zt$center==2,1,0)
+center3=ifelse(Zt$center==3,1,0)
+sex=ifelse(Zt$sex==1,1,0)
+age=scale(Zt$age)
+Mt=scale(Mt)
+agedata=data.frame(id1=id1,id2=id2,tstart,tstop,status,exposure,center1,center2,center3,race,sex,age,PCt,cellt,Mt)
+rate=1-length(which(status!=0))/n
+rate
+N=dim(agedata)[1]
+p=dim(Mt)[2]
+q=18
+###########################################totle effects#############
+age_total=agedata %>%
+  group_by(id1) %>%
+  slice_tail(n = 1)
+coxph(as.formula(paste("Surv(tstop,status)~", paste(names(age_total[,-c(1:5)])[1:7], collapse = "+"))),data=age_total)
+############### SIS  step########################
+alpha_SIS=beta_SIS=NULL
+T=9
+for(i in 1:T){
+  alpha_SIS=rbind(alpha_SIS,read.csv(paste("/home/liulili/lili/Y015/alpha_SIS",i,".csv",sep="")))
+  beta_SIS=rbind(beta_SIS,read.csv(paste("/home/liulili/lili/Y015/beta_SIS",i,".csv",sep="")))
+}
+d_0=round(n/(2*log(n)))
+ab_SIS=as.numeric(as.matrix(alpha_SIS*beta_SIS))
+ID_SIS=which(-abs(ab_SIS) <= sort(-abs(ab_SIS))[d_0])
+cat("ID_SIS=",ID_SIS,'\n')
+if(length(ID_SIS)==0){
+  stop("ID_SIS is empty")
+}else{
+  data_SIS=data.frame(tstart,tstop,status,id1,id2,exposure,center1,center2,center3,race,sex,age,PCt,cellt,Mt[,ID_SIS])
+  formula <- as.formula(paste("Surv(tstart,tstop,status)~", paste(names(data_SIS[,-c(1:5)]), collapse = "+")))
+  ############lasso for selecting beta#######################
+  cv_fit=pcoxtimecv(formula,data=data_SIS,lambdas=seq(0.0001,0.02,length=50),nfolds=5,tol=1e-4)
+  print(cv_fit$lambda.min)
+  lambda.min=cv_fit$lambda.min
+  fit3=pcoxtime(formula,data=data_SIS,lambda=lambda.min)
+  set1=which(coef(fit3)[-c(1:(q+1))]!=0)
+  p1=length(which(coef(fit3)[1:(q+1)]!=0))
+  ID_lasso=ID_SIS[set1]
+  cat("ID_lasso=",ID_lasso,'\n')
+  fit4=coxph(as.formula(paste("Surv(tstart,tstop,status)~", paste(names(which(coef(fit3)!=0)), collapse = "+"))),data=data_SIS,cluster=id1)
+  betaest=coef(fit4)[-c(1:p1)]
+  beta_se=summary(fit4)$coef[-c(1:p1),4]
+  beta_pvalue=summary(fit4)$coef[-c(1:p1),6]
+  d=length(ID_lasso)
+  alphaest=alpha_se=alpha_pvalue=rep(0,d)
+  for(k in 1:d){
+    fit5=lmer(as.formula(paste0(names(set1)[k], "~", paste(names(data_SIS)[6:(6+q)], collapse = " + "), " + (1|id1)")),
+              data=data_SIS,control=lmerControl(check.conv.singular = .makeCC(action = "ignore",  tol = 1e-3)))
+    alphaest[k]=fixef(fit5)[2]
+    alpha_se[k]=summary(fit5)$coef[2,2]
+    alpha_pvalue[k]=summary(fit5)$coef[2,5]
+  }
+  ################    the multiple-testing  procedure ####
+  bind.p <-rbind(pmin(beta_pvalue*d,1), pmin(alpha_pvalue*d,1))
+  final.p <- apply(bind.p, 2, max)
+  set=which(final.p<=0.05)
+  ID_fdr=ID_lasso[set]
+  if(length(ID_fdr) > 0){
+    alphahat=alphaest[set]
+    alpha.se=alpha_se[set]
+    ######refit to obtain estimates of beta#################
+    fit6=coxph(as.formula(paste("Surv(tstart,tstop,status)~", paste(names(which(coef(fit3)!=0))[c(1:p1,p1+set)], collapse = "+"))), data=data_SIS,cluster=id1)
+    betahat=coef(fit6)[-c(1:p1)]
+    beta.se=summary(fit6)$coef[-c(1:p1),4]
+    print(list(ID=ID_fdr,alphahat=alphahat,alpha.se=alpha.se,betahat=betahat,beta.se=beta.se,pvalue=final.p[which(final.p<=0.05)]))
+  }else{
+    stop("ID_fdr is empty")
+  }
+}
+
+
